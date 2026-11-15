@@ -1,10 +1,9 @@
-"""MediaPipe HandLandmarker tracker and optional Jarvis HUD frame renderer."""
+"""MediaPipe HandLandmarker tracker and Jarvis HUD frame renderer."""
 
 from __future__ import annotations
 
 import urllib.request
 from pathlib import Path
-from typing import Any
 
 import cv2
 import mediapipe as mp
@@ -29,7 +28,6 @@ HAND_CONNECTIONS: tuple[tuple[int, int], ...] = (
 
 
 def ensure_model_downloaded(model_path: Path = DEFAULT_MODEL_PATH) -> Path:
-    """Download MediaPipe hand_landmarker.task once if not already present locally."""
     if model_path.exists() and model_path.stat().st_size > 100_000:
         return model_path
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +38,7 @@ def ensure_model_downloaded(model_path: Path = DEFAULT_MODEL_PATH) -> Path:
 
 
 class HandTracker:
-    """Wraps MediaPipe HandLandmarker in VIDEO mode for low-latency single-hand tracking."""
+    """Fast MediaPipe HandLandmarker in VIDEO mode using downscaled RGB inference."""
 
     def __init__(self, model_path: Path = DEFAULT_MODEL_PATH) -> None:
         resolved_model = ensure_model_downloaded(model_path)
@@ -49,9 +47,9 @@ class HandTracker:
             base_options=base_options,
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
             num_hands=1,
-            min_hand_detection_confidence=0.6,
-            min_hand_presence_confidence=0.6,
-            min_tracking_confidence=0.6,
+            min_hand_detection_confidence=0.55,
+            min_hand_presence_confidence=0.55,
+            min_tracking_confidence=0.55,
         )
         self._landmarker = mp.tasks.vision.HandLandmarker.create_from_options(options)
         self._last_ts_ms = 0
@@ -59,8 +57,9 @@ class HandTracker:
     def detect(
         self, bgr_frame: np.ndarray, timestamp_s: float
     ) -> list[tuple[float, float, float]] | None:
-        """Detect a single hand and return 21 normalized (x, y, z) landmarks or None."""
-        rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+        """Downscale to 384x288 for fast CPU inference; landmarks remain normalized [0..1]."""
+        small = cv2.resize(bgr_frame, (384, 288), interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
         ts_ms = int(timestamp_s * 1000.0)
@@ -86,20 +85,20 @@ def render_jarvis_hud(
     roi: tuple[float, float, float, float],
     fps: float,
     anchor: tuple[float, float] | None = None,
+    pinch_ratio: float = 1.0,
 ) -> np.ndarray:
-    """Draw a dark cyan Jarvis-style HUD overlay onto a BGR frame (only when HUD is visible)."""
-    frame = cv2.convertScaleAbs(bgr_frame, alpha=0.58, beta=0)
+    """Draw Jarvis cyber HUD overlay with live ROI box, skeleton, and pinch feedback."""
+    frame = cv2.convertScaleAbs(bgr_frame, alpha=0.62, beta=0)
     h, w = frame.shape[:2]
 
-    # Active ROI box
     x1 = int(roi[0] * w)
     y1 = int(roi[2] * h)
     x2 = int(roi[1] * w)
     y2 = int(roi[3] * h)
-    roi_color = (230, 210, 40) if mode in ("ACTIVE", "LEFT_PINCH", "DRAGGING") else (90, 140, 160)
+
+    roi_color = (240, 210, 40) if mode != "CLUTCH" else (80, 170, 255)
     cv2.rectangle(frame, (x1, y1), (x2, y2), roi_color, 1, cv2.LINE_AA)
 
-    # Corner brackets for cyber HUD look
     b = 14
     for cx, cy, dx, dy in (
         (x1, y1, 1, 1),
@@ -107,53 +106,34 @@ def render_jarvis_hud(
         (x1, y2, 1, -1),
         (x2, y2, -1, -1),
     ):
-        cv2.line(frame, (cx, cy), (cx + dx * b, cy), (255, 220, 60), 2, cv2.LINE_AA)
-        cv2.line(frame, (cx, cy), (cx, cy + dy * b), (255, 220, 60), 2, cv2.LINE_AA)
+        cv2.line(frame, (cx, cy), (cx + dx * b, cy), (255, 225, 70), 2, cv2.LINE_AA)
+        cv2.line(frame, (cx, cy), (cx, cy + dy * b), (255, 225, 70), 2, cv2.LINE_AA)
 
-    # Hand skeleton
     if landmarks:
         pts = [(int(lm[0] * w), int(lm[1] * h)) for lm in landmarks]
         for a, b_idx in HAND_CONNECTIONS:
-            cv2.line(frame, pts[a], pts[b_idx], (255, 200, 30), 2, cv2.LINE_AA)
+            cv2.line(frame, pts[a], pts[b_idx], (255, 195, 35), 2, cv2.LINE_AA)
         for idx, pt in enumerate(pts):
-            radius = 5 if idx in (4, 8, 12, 16, 20) else 3
+            radius = 5 if idx in (4, 8, 12) else 3
             color = (0, 255, 255) if idx in (4, 8, 12) else (240, 180, 40)
             cv2.circle(frame, pt, radius, color, -1, cv2.LINE_AA)
 
+        # Visual pinch meter line between thumb & index
+        pinch_col = (100, 255, 120) if pinch_ratio < 0.36 else (180, 220, 240)
+        cv2.line(frame, pts[4], pts[8], pinch_col, 2, cv2.LINE_AA)
+
         if anchor is not None:
             ax, ay = int(anchor[0] * w), int(anchor[1] * h)
-            cv2.circle(frame, (ax, ay), 9, (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.circle(frame, (ax, ay), 4, (0, 255, 180), -1, cv2.LINE_AA)
+            cv2.circle(frame, (ax, ay), 10, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.circle(frame, (ax, ay), 5, (0, 255, 190), -1, cv2.LINE_AA)
 
-    # Status pill
-    mode_colors: dict[str, tuple[int, int, int]] = {
-        "ACTIVE": (255, 220, 40),
-        "LEFT_PINCH": (120, 255, 120),
-        "DRAGGING": (80, 255, 160),
-        "RIGHT_CLICK": (255, 140, 255),
-        "SCROLL": (255, 190, 60),
-        "CLUTCH": (60, 180, 255),
-        "STANDBY": (100, 160, 255),
-        "NO_HAND": (140, 140, 140),
-    }
-    badge_col = mode_colors.get(mode, (200, 200, 200))
-    cv2.putText(
-        frame,
-        f"JARVIS // {mode}",
-        (14, 28),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.62,
-        badge_col,
-        2,
-        cv2.LINE_AA,
-    )
     cv2.putText(
         frame,
         f"{fps:.0f} FPS",
-        (w - 92, 28),
+        (w - 86, 26),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
-        (200, 230, 240),
+        (200, 235, 250),
         1,
         cv2.LINE_AA,
     )

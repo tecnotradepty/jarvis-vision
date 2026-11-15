@@ -1,116 +1,157 @@
-"""Background orchestrator, Windows System Tray icon, and global hotkeys."""
+"""Gemini Desktop Voice Assistant orchestrator, System Tray icon, and global hotkeys."""
 
 from __future__ import annotations
 
 import os
 import subprocess
 import threading
-import time
 from typing import Any
 
-import cv2
 import pystray
 from PIL import Image, ImageDraw
 from pynput import keyboard
 
+from .ai_brain import GeminiBrain
+from .commands import LocalCommandRouter, extract_wake_command
 from .config import DEFAULT_CONFIG_PATH, load_config, save_config
-from .gestures import GestureEngine
-from .hud import JarvisHUD
-from .smoothing import CursorMapper
-from .tracker import HandTracker, render_jarvis_hud
-from .win_input import WindowsMouseController
+from .hud import GeminiHUD
+from .speech_out import SpeechOut
+from .voice_listener import VoiceListener
 
 
-def _make_tray_icon(color_hex: str, inner_hex: str) -> Image.Image:
-    """Generate a crisp Jarvis arc-reactor style icon for the Windows System Tray."""
+def _make_gemini_tray_icon(color_hex: str, core_hex: str) -> Image.Image:
+    """Generate a glowing Gemini diamond-sparkle icon for the Windows System Tray."""
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.ellipse((4, 4, 60, 60), fill=(10, 16, 28, 255), outline=color_hex, width=4)
-    draw.ellipse((15, 15, 49, 49), outline=inner_hex, width=2)
-    draw.ellipse((24, 24, 40, 40), fill=color_hex)
+    draw.ellipse((4, 4, 60, 60), fill=(10, 16, 28, 255), outline=color_hex, width=3)
+    spark = [(32, 12), (38, 26), (52, 32), (38, 38), (32, 52), (26, 38), (12, 32), (26, 26)]
+    draw.polygon(spark, fill=core_hex)
     return img
 
 
-class JarvisVisionApp:
-    """Runs invisible camera hand-tracking in background with Tray + Hotkey + HUD."""
+class GeminiAssistantApp:
+    """Runs Gemini voice assistant in background with Tray, Push-to-Talk, local commands & optional AI."""
 
     def __init__(self) -> None:
         self.cfg: dict[str, Any] = load_config()
-        self.mouse = WindowsMouseController()
-        self.mapper = CursorMapper(
-            screen_w=self.mouse.screen_w,
-            screen_h=self.mouse.screen_h,
-            roi_x_min=self.cfg["tracking"]["roi_x_min"],
-            roi_x_max=self.cfg["tracking"]["roi_x_max"],
-            roi_y_min=self.cfg["tracking"]["roi_y_min"],
-            roi_y_max=self.cfg["tracking"]["roi_y_max"],
-            min_cutoff=self.cfg["tracking"]["min_cutoff"],
-            beta=self.cfg["tracking"]["beta"],
-            d_cutoff=self.cfg["tracking"]["d_cutoff"],
-            deadzone_px=self.cfg["tracking"]["deadzone_px"],
+        self.speech = SpeechOut(
+            tts_enabled=bool(self.cfg["assistant"]["tts_enabled"]),
+            chime_enabled=bool(self.cfg["assistant"]["chime_enabled"]),
         )
-        self.gestures = GestureEngine(
-            cursor_anchor=self.cfg["tracking"]["cursor_anchor"],
-            pinch_down_ratio=self.cfg["gestures"]["pinch_down_ratio"],
-            pinch_up_ratio=self.cfg["gestures"]["pinch_up_ratio"],
-            pinch_freeze_ratio=self.cfg["gestures"]["pinch_freeze_ratio"],
-            drag_hold_ms=self.cfg["gestures"]["drag_hold_ms"],
-            right_click_cooldown_ms=self.cfg["gestures"]["right_click_cooldown_ms"],
-            scroll_speed=self.cfg["gestures"]["scroll_speed"],
-            sleep_hold_ms=self.cfg["gestures"]["sleep_hold_ms"],
+        self.brain = GeminiBrain(
+            api_key=str(self.cfg["ai"]["gemini_api_key"]),
+            model=str(self.cfg["ai"]["model"]),
         )
 
-        self._stop_event = threading.Event()
-        self._paused = False  # True -> camera released (privacy / zero CPU)
-        self._standby = False  # True -> hand-triggered sleep (watching at low FPS)
-        self._mirror = bool(self.cfg["camera"]["mirror"])
-        self._state_lock = threading.Lock()
-
-        self.hud = JarvisHUD(
+        self.hud = GeminiHUD(
             width=int(self.cfg["ui"]["hud_width"]),
             height=int(self.cfg["ui"]["hud_height"]),
             opacity=float(self.cfg["ui"]["hud_opacity"]),
-            on_toggle_pause=self.toggle_pause,
-            on_toggle_mirror=self.set_mirror,
-            on_smoothing_change=self.set_smoothing,
+            on_push_to_talk=self.push_to_talk,
+            on_toggle_mute=self.toggle_mute,
+            on_toggle_tts=self.set_tts_enabled,
+            on_submit_text=self.handle_direct_text,
+            on_save_api_key=self.save_api_key,
             on_exit=self.stop,
-            initial_mirror=self._mirror,
-            initial_min_cutoff=float(self.cfg["tracking"]["min_cutoff"]),
+            initial_tts=bool(self.cfg["assistant"]["tts_enabled"]),
+            initial_api_key=str(self.cfg["ai"]["gemini_api_key"]),
+            initial_ai_ready=self.brain.is_configured,
         )
 
-        self._icon_active = _make_tray_icon("#38BDF8", "#0284C7")
-        self._icon_standby = _make_tray_icon("#F59E0B", "#B45309")
-        self._icon_paused = _make_tray_icon("#64748B", "#334155")
+        self.router = LocalCommandRouter(
+            on_hide_hud=self.hud.hide,
+            on_show_hud=self.hud.show,
+            on_mute_mic=self.toggle_mute,
+        )
+
+        self.listener = VoiceListener(
+            stt_mode=str(self.cfg["assistant"].get("stt_mode", "auto")),
+            language=str(self.cfg["assistant"]["language"]),
+            device_index=self.cfg["assistant"]["mic_device_index"],
+            vad_min_rms=float(self.cfg["assistant"]["vad_min_rms"]),
+            vad_multiplier=float(self.cfg["assistant"]["vad_multiplier"]),
+            silence_timeout_s=float(self.cfg["assistant"]["silence_timeout_s"]),
+            should_ignore_audio=lambda: self.speech.recently_spoke,
+            on_level=self.hud.set_level,
+            on_state=self._on_voice_state,
+            on_utterance=self._on_utterance,
+        )
+
+        self._icon_active = _make_gemini_tray_icon("#38BDF8", "#818CF8")
+        self._icon_muted = _make_gemini_tray_icon("#64748B", "#94A3B8")
         self.tray: pystray.Icon | None = None
         self._hotkeys: keyboard.GlobalHotKeys | None = None
-        self._worker_thread: threading.Thread | None = None
 
-    def set_mirror(self, enabled: bool) -> None:
-        self._mirror = bool(enabled)
-        self.cfg["camera"]["mirror"] = self._mirror
-        save_config(self.cfg)
+    def _on_voice_state(self, state: str) -> None:
+        self.hud.set_state(state, muted=self.listener.is_muted)
 
-    def set_smoothing(self, min_cutoff: float) -> None:
-        self.mapper.update_params(min_cutoff=min_cutoff)
-        self.cfg["tracking"]["min_cutoff"] = round(min_cutoff, 2)
-        save_config(self.cfg)
+    def _on_utterance(self, text: str, was_ptt: bool) -> None:
+        wake_words = self.cfg["assistant"]["wake_words"]
+        triggered, command_body = extract_wake_command(text, wake_words)
 
-    def toggle_pause(self) -> None:
-        with self._state_lock:
-            self._paused = not self._paused
-            if self._paused:
-                self._standby = False
-            paused = self._paused
-        self.mouse.release_all()
-        self.gestures.reset()
-        self.mapper.reset()
+        if not triggered and not was_ptt:
+            return
+
+        final_cmd = command_body if triggered else text
+        self.speech.play_chime("wake")
+        self.hud.append_log("Tú", text)
+        self._execute_command_async(final_cmd)
+
+    def handle_direct_text(self, text: str) -> None:
+        """Handle text typed directly into the HUD input box (no wake word needed)."""
+        wake_words = self.cfg["assistant"]["wake_words"]
+        triggered, body = extract_wake_command(text, wake_words)
+        cmd = body if triggered and body else text
+        self.hud.append_log("Tú", text)
+        self._execute_command_async(cmd)
+
+    def _execute_command_async(self, command_text: str) -> None:
+        threading.Thread(target=self._execute_command, args=(command_text,), daemon=True).start()
+
+    def _execute_command(self, command_text: str) -> None:
+        res = self.router.execute(command_text)
+        if res.handled:
+            self.speech.play_chime("ok")
+            if res.reply:
+                self.hud.append_log("Gemini", res.reply)
+                self.speech.speak(res.reply)
+            return
+
+        # Fallback to Gemini AI API if configured
+        self.hud.set_state("PENSANDO...")
+        reply = self.brain.ask(command_text)
+        self.speech.play_chime("ok" if self.brain.is_configured else "error")
+        self.hud.append_log("Gemini", reply)
+        self.speech.speak(reply)
+        self.hud.set_state("SILENCIADO" if self.listener.is_muted else "ESCUCHANDO")
+
+    def push_to_talk(self) -> None:
+        if self.listener.is_muted:
+            self.listener.set_muted(False)
+            self._refresh_tray_visual()
+        self.speech.play_chime("wake")
+        self.listener.trigger_push_to_talk()
+
+    def toggle_mute(self) -> None:
+        self.listener.set_muted(not self.listener.is_muted)
         self._refresh_tray_visual()
-        if paused:
-            self.hud.push_frame(None, "JARVIS // PAUSADO (Cámara apagada)")
 
     def toggle_hud(self) -> None:
         self.hud.toggle()
+
+    def set_tts_enabled(self, enabled: bool) -> None:
+        self.speech.tts_enabled = bool(enabled)
+        self.cfg["assistant"]["tts_enabled"] = bool(enabled)
+        save_config(self.cfg)
+
+    def save_api_key(self, api_key: str) -> None:
+        self.brain.set_api_key(api_key)
+        self.cfg["ai"]["gemini_api_key"] = api_key.strip()
+        save_config(self.cfg)
+        self.hud.set_ai_ready(self.brain.is_configured)
+        msg = "API Key de Gemini guardada. IA conversacional activa." if self.brain.is_configured else "API Key eliminada. Modo 100% offline."
+        self.hud.append_log("Sistema", msg)
 
     def _open_config_file(self) -> None:
         if os.name == "nt":
@@ -121,165 +162,70 @@ class JarvisVisionApp:
     def _refresh_tray_visual(self) -> None:
         if self.tray is None:
             return
-        if self._paused:
-            self.tray.icon = self._icon_paused
-            self.tray.title = "Jarvis Vision — Pausado (Ctrl+Alt+J)"
-        elif self._standby:
-            self.tray.icon = self._icon_standby
-            self.tray.title = "Jarvis Vision — Standby (Meñique+Pulgar para despertar)"
+        if self.listener.is_muted:
+            self.tray.icon = self._icon_muted
+            self.tray.title = "Gemini — Micrófono silenciado (Ctrl+Alt+M)"
         else:
             self.tray.icon = self._icon_active
-            self.tray.title = "Jarvis Vision — Activo en segundo plano"
+            self.tray.title = "Gemini — Escuchando 'Gemini...' (Ctrl+Alt+H para abrir)"
 
     def _build_tray(self) -> pystray.Icon:
         menu = pystray.Menu(
             pystray.MenuItem(
-                lambda _item: "Reanudar Cámara (Ctrl+Alt+J)" if self._paused else "Pausar Cámara (Ctrl+Alt+J)",
-                lambda _icon, _item: self.toggle_pause(),
+                lambda _item: "Ocultar Panel (Ctrl+Alt+H)" if self.hud.is_visible else "Abrir Panel Gemini (Ctrl+Alt+H)",
+                lambda _icon, _item: self.toggle_hud(),
                 default=True,
             ),
+            pystray.MenuItem("Hablar ahora (Ctrl+Alt+G)", lambda _icon, _item: self.push_to_talk()),
             pystray.MenuItem(
-                lambda _item: "Ocultar HUD (Ctrl+Alt+H)" if self.hud.is_visible else "Mostrar HUD Jarvis (Ctrl+Alt+H)",
-                lambda _icon, _item: self.toggle_hud(),
+                lambda _item: "Activar Micrófono (Ctrl+Alt+M)" if self.listener.is_muted else "Silenciar Micrófono (Ctrl+Alt+M)",
+                lambda _icon, _item: self.toggle_mute(),
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Abrir config.json", lambda _icon, _item: self._open_config_file()),
-            pystray.MenuItem("Salir", lambda _icon, _item: self.stop()),
+            pystray.MenuItem("Cerrar Gemini", lambda _icon, _item: self.stop()),
         )
-        return pystray.Icon("jarvis_vision", self._icon_active, "Jarvis Vision — Activo", menu)
+        return pystray.Icon("gemini_assistant", self._icon_active, "Gemini — Escuchando", menu)
 
     def _start_hotkeys(self) -> None:
-        hk_pause = self.cfg["ui"]["hotkey_toggle_tracking"]
+        hk_ptt = self.cfg["ui"]["hotkey_push_to_talk"]
+        hk_mute = self.cfg["ui"]["hotkey_toggle_mic"]
         hk_hud = self.cfg["ui"]["hotkey_toggle_hud"]
         self._hotkeys = keyboard.GlobalHotKeys(
             {
-                hk_pause: self.toggle_pause,
+                hk_ptt: self.push_to_talk,
+                hk_mute: self.toggle_mute,
                 hk_hud: self.toggle_hud,
             }
         )
         self._hotkeys.daemon = True
         self._hotkeys.start()
 
-    def _tracking_loop(self) -> None:
-        tracker = HandTracker()
-        cap: cv2.VideoCapture | None = None
-        fps_t = time.perf_counter()
-        frames = 0
-        fps = 0.0
-
-        roi = (
-            float(self.cfg["tracking"]["roi_x_min"]),
-            float(self.cfg["tracking"]["roi_x_max"]),
-            float(self.cfg["tracking"]["roi_y_min"]),
-            float(self.cfg["tracking"]["roi_y_max"]),
-        )
-
-        try:
-            while not self._stop_event.is_set():
-                if self._paused:
-                    if cap is not None:
-                        cap.release()
-                        cap = None
-                    time.sleep(0.15)
-                    continue
-
-                if cap is None:
-                    cam_idx = int(self.cfg["camera"]["index"])
-                    cap = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW)
-                    if not cap.isOpened():
-                        cap = cv2.VideoCapture(cam_idx)
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.cfg["camera"]["width"]))
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.cfg["camera"]["height"]))
-                    cap.set(cv2.CAP_PROP_FPS, int(self.cfg["camera"]["fps"]))
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    if not cap.isOpened():
-                        self.hud.push_frame(None, "ERROR // No se pudo abrir la cámara")
-                        time.sleep(1.0)
-                        continue
-
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    time.sleep(0.02)
-                    continue
-
-                if self._mirror:
-                    frame = cv2.flip(frame, 1)
-
-                now = time.perf_counter()
-                landmarks = tracker.detect(frame, now)
-                action = self.gestures.evaluate(landmarks, now)
-
-                if action.toggle_sleep_event:
-                    self._standby = not self._standby
-                    self.mouse.release_all()
-                    self.mapper.reset()
-                    self._refresh_tray_visual()
-
-                display_mode = "STANDBY" if self._standby else action.mode
-
-                if not self._standby:
-                    if action.left_down_event:
-                        self.mouse.left_down()
-                    if action.left_up_event:
-                        self.mouse.left_up()
-                    if action.right_click_event:
-                        self.mouse.right_click()
-                    if abs(action.scroll_delta) > 0.01:
-                        self.mouse.scroll(action.scroll_delta)
-
-                    if (
-                        action.anchor_x is not None
-                        and action.anchor_y is not None
-                        and not action.freeze_cursor
-                        and action.mode in ("ACTIVE", "DRAGGING")
-                    ):
-                        px, py = self.mapper.map_to_screen(action.anchor_x, action.anchor_y, now)
-                        self.mouse.move_to(px, py)
-                    elif action.mode == "NO_HAND":
-                        self.mapper.reset()
-                else:
-                    time.sleep(0.06)
-
-                frames += 1
-                if now - fps_t >= 0.5:
-                    fps = frames / (now - fps_t)
-                    frames = 0
-                    fps_t = now
-
-                if self.hud.is_visible:
-                    anchor_pt = (
-                        (action.anchor_x, action.anchor_y)
-                        if action.anchor_x is not None and action.anchor_y is not None
-                        else None
-                    )
-                    hud_frame = render_jarvis_hud(frame, landmarks, display_mode, roi, fps, anchor_pt)
-                    self.hud.push_frame(hud_frame, f"JARVIS // {display_mode} ({fps:.0f} FPS)")
-        finally:
-            self.mouse.release_all()
-            if cap is not None:
-                cap.release()
-            tracker.close()
-
     def run(self) -> None:
-        """Start background worker, hotkeys, tray icon, and HUD event loop."""
         self._start_hotkeys()
-
-        self._worker_thread = threading.Thread(target=self._tracking_loop, daemon=True)
-        self._worker_thread.start()
+        self.listener.start()
 
         self.tray = self._build_tray()
-        tray_thread = threading.Thread(target=self.tray.run, daemon=True)
-        tray_thread.start()
+        threading.Thread(target=self.tray.run, daemon=True).start()
 
+        self.hud.append_log(
+            "Sistema",
+            "Di 'Gemini, <comando>' o presiona Ctrl+Alt+G. La cámara permanece apagada.",
+        )
         start_visible = not bool(self.cfg["ui"]["start_minimized"])
         self.hud.run_mainloop(start_visible=start_visible)
 
     def stop(self) -> None:
-        """Gracefully stop tracking, hotkeys, tray, and HUD."""
-        self._stop_event.set()
-        self.mouse.release_all()
+        self.listener.stop()
+        self.speech.close()
         if self._hotkeys is not None:
-            self._hotkeys.stop()
+            try:
+                self._hotkeys.stop()
+            except Exception:
+                pass
         if self.tray is not None:
-            self.tray.stop()
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
         self.hud.close()

@@ -1,25 +1,24 @@
-# Jarvis Vision — Mouse Aéreo & Control por Gestos en Segundo Plano
+# Gemini — Asistente de Voz Local para Windows
 
-Motor local de visión por computadora para Windows que funciona de forma **invisible en segundo plano** (bandeja del sistema / System Tray) y convierte tu cámara web en un mouse aéreo fluido estilo Jarvis, con un HUD flotante opcional para calibración.
+Asistente de escritorio estilo Jarvis llamado **Gemini** que corre en segundo plano (System Tray) escuchando tu voz sin encender la cámara ni el LED.
 
-## Gestos del Mouse Aéreo
+## Cómo usarlo
 
-| Gesto | Acción |
-| :--- | :--- |
-| **Mano abierta / Índice extendido** | Mover cursor suavizado (Filtro One-Euro) |
-| **Pellizco Pulgar + Índice (toque)** | Clic izquierdo (con estabilización anti-salto) |
-| **Pellizco Pulgar + Índice (mantener >220ms)** | Arrastrar y soltar (*Drag & Drop*) |
-| **Pellizco Pulgar + Medio** | Clic derecho |
-| **Índice + Medio arriba (Anular y Meñique doblados)** | Scroll vertical (sube o baja la mano) |
-| **Puño cerrado** | *Clutch* (congela el cursor para reposicionar la mano) |
-| **Pellizco Pulgar + Meñique (mantener ~0.8s)** | Alternar modo *Standby* sin usar teclado |
-
-## Atajos Globales
-
-- **`Ctrl + Alt + J`**: Pausar / Reanudar cámara (apaga el LED de la cámara y libera CPU).
-- **`Ctrl + Alt + H`**: Mostrar / Ocultar el HUD flotante estilo Jarvis.
+1. **Palabra clave ("Gemini"):** Di en voz natural, por ejemplo:
+   - *"Gemini, pausa la música"* / *"Gemini, siguiente canción"*
+   - *"Gemini, sube el volumen"* / *"Gemini, baja el volumen"* / *"Gemini, silencia el sonido"*
+   - *"Gemini, abre Chrome"* / *"Gemini, abre YouTube"* / *"Gemini, busca en YouTube música lofi"*
+   - *"Gemini, abre Spotify"* / *"Gemini, abre Obsidian"* / *"Gemini, abre VS Code"*
+   - *"Gemini, minimiza todo"* / *"Gemini, cambia de ventana"* / *"Gemini, captura de pantalla"*
+   - *"Gemini, qué hora es"* / *"Gemini, segundo plano"*
+2. **Atajos globales:**
+   - **`Ctrl + Alt + G`**: Hablar directo sin decir *"Gemini"* (*Push-to-Talk*).
+   - **`Ctrl + Alt + M`**: Silenciar / Activar micrófono.
+   - **`Ctrl + Alt + H`**: Mostrar / Ocultar panel visual.
+3. **IA Conversacional (Opcional):**
+   - Pega tu `GEMINI_API_KEY` en el panel inferior y haz clic en **Guardar Key** para responder cualquier pregunta general con `gemini-2.5-flash` y leerla en voz alta.
 
 ## Ejecución
 
-- **Invisible en segundo plano (sin consola):** doble clic en `start_jarvis_bg.vbs`.
+- **Sin ventana de consola (panel + 2do plano en Tray):** doble clic en `start_jarvis_bg.vbs`.
 - **Con consola de diagnóstico:** ejecutar `start_jarvis_debug.bat` o `.venv\Scripts\python.exe main.py`.

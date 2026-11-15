@@ -1,8 +1,10 @@
-"""One-Euro Filter and coordinate mapping for jitter-free cursor control."""
+"""One-Euro Filter and ergonomic ROI coordinate mapping for cursor control."""
 
 from __future__ import annotations
 
 import math
+
+from .config import compute_roi
 
 
 def _smoothing_factor(t_e: float, cutoff: float) -> float:
@@ -19,8 +21,8 @@ class OneEuroFilter:
 
     def __init__(
         self,
-        min_cutoff: float = 1.4,
-        beta: float = 0.04,
+        min_cutoff: float = 2.0,
+        beta: float = 0.08,
         d_cutoff: float = 1.0,
     ) -> None:
         self.min_cutoff = min_cutoff
@@ -66,21 +68,22 @@ class CursorMapper:
         self,
         screen_w: int,
         screen_h: int,
-        roi_x_min: float = 0.20,
-        roi_x_max: float = 0.80,
-        roi_y_min: float = 0.18,
-        roi_y_max: float = 0.78,
-        min_cutoff: float = 1.4,
-        beta: float = 0.04,
+        sensitivity: float = 2.2,
+        roi_center_x: float = 0.50,
+        roi_center_y: float = 0.45,
+        min_cutoff: float = 2.0,
+        beta: float = 0.08,
         d_cutoff: float = 1.0,
-        deadzone_px: float = 1.5,
+        deadzone_px: float = 1.0,
     ) -> None:
         self.screen_w = screen_w
         self.screen_h = screen_h
-        self.roi_x_min = roi_x_min
-        self.roi_x_max = roi_x_max
-        self.roi_y_min = roi_y_min
-        self.roi_y_max = roi_y_max
+        self.sensitivity = sensitivity
+        self.roi_center_x = roi_center_x
+        self.roi_center_y = roi_center_y
+        self.roi_x_min, self.roi_x_max, self.roi_y_min, self.roi_y_max = compute_roi(
+            sensitivity, roi_center_x, roi_center_y
+        )
         self.deadzone_px = deadzone_px
         self.filter_x = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
         self.filter_y = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
@@ -91,13 +94,22 @@ class CursorMapper:
         self.filter_y.reset()
         self._last_px = None
 
+    def get_roi(self) -> tuple[float, float, float, float]:
+        return (self.roi_x_min, self.roi_x_max, self.roi_y_min, self.roi_y_max)
+
     def update_params(
         self,
+        sensitivity: float | None = None,
         min_cutoff: float | None = None,
         beta: float | None = None,
         screen_w: int | None = None,
         screen_h: int | None = None,
     ) -> None:
+        if sensitivity is not None:
+            self.sensitivity = sensitivity
+            self.roi_x_min, self.roi_x_max, self.roi_y_min, self.roi_y_max = compute_roi(
+                sensitivity, self.roi_center_x, self.roi_center_y
+            )
         if min_cutoff is not None:
             self.filter_x.min_cutoff = min_cutoff
             self.filter_y.min_cutoff = min_cutoff

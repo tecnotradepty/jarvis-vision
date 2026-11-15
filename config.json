@@ -1,4 +1,30 @@
 {
+  "assistant": {
+    "name": "Gemini",
+    "wake_words": ["gemini", "geminis", "gémini", "géminis", "jemini", "yemini", "hemini"],
+    "whisper_model": "base",
+    "stt_mode": "auto",
+    "language": "es-ES",
+    "tts_enabled": true,
+    "chime_enabled": true,
+    "mic_device_index": null,
+    "vad_min_rms": 0.014,
+    "vad_multiplier": 2.6,
+    "silence_timeout_s": 0.65
+  },
+  "ai": {
+    "gemini_api_key": "",
+    "model": "gemini-2.5-flash"
+  },
+  "ui": {
+    "start_minimized": false,
+    "hud_width": 520,
+    "hud_height": 540,
+    "hud_opacity": 0.96,
+    "hotkey_push_to_talk": "<ctrl>+<alt>+g",
+    "hotkey_toggle_mic": "<ctrl>+<alt>+m",
+    "hotkey_toggle_hud": "<ctrl>+<alt>+h"
+  },
   "camera": {
     "index": 0,
     "width": 640,
@@ -7,31 +33,21 @@
     "mirror": true
   },
   "tracking": {
-    "roi_x_min": 0.20,
-    "roi_x_max": 0.80,
-    "roi_y_min": 0.18,
-    "roi_y_max": 0.78,
-    "cursor_anchor": "knuckle",
-    "min_cutoff": 1.4,
-    "beta": 0.04,
+    "sensitivity": 2.2,
+    "roi_center_x": 0.50,
+    "roi_center_y": 0.45,
+    "cursor_anchor": "palm",
+    "min_cutoff": 2.0,
+    "beta": 0.08,
     "d_cutoff": 1.0,
-    "deadzone_px": 1.5
+    "deadzone_px": 1.0
   },
   "gestures": {
-    "pinch_down_ratio": 0.30,
-    "pinch_up_ratio": 0.40,
-    "pinch_freeze_ratio": 0.48,
-    "drag_hold_ms": 220,
+    "pinch_down_ratio": 0.32,
+    "pinch_up_ratio": 0.42,
+    "drag_hold_ms": 260,
+    "double_click_window_ms": 480,
     "right_click_cooldown_ms": 450,
-    "scroll_speed": 42.0,
-    "sleep_hold_ms": 800
-  },
-  "ui": {
-    "start_minimized": true,
-    "hud_width": 460,
-    "hud_height": 360,
-    "hud_opacity": 0.92,
-    "hotkey_toggle_tracking": "<ctrl>+<alt>+j",
-    "hotkey_toggle_hud": "<ctrl>+<alt>+h"
+    "scroll_speed": 55.0
   }
 }
